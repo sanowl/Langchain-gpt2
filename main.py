@@ -1,62 +1,110 @@
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, pipeline
 from langchain.llms import HuggingFacePipeline
-# Assuming the following modules exist in the version of langchain you're using
 from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.embeddings import HuggingFaceEmbeddings, OpenAIEmbeddings, SentenceTransformerEmbeddings
 from langchain.chains import RetrievalQA
-from langchain.preprocessors import BasicPreprocessor
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import logging
+import os
 
-# Load the GPT-2 model and tokenizer once to avoid repeated loading
-model_name = "gpt2"
-tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-model = GPT2LMHeadModel.from_pretrained(model_name)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Create a Hugging Face pipeline for text generation
-hf_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer)
+class AdvancedQAAlgorithm:
+    def __init__(self, model_name="gpt2", embedding_model="HuggingFace", chain_type="stuff"):
+        # Initialize the class with the specified model, embedding model, and chain type
+        self.model_name = model_name
+        self.embedding_model = embedding_model
+        self.chain_type = chain_type
+        self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+        self.model = GPT2LMHeadModel.from_pretrained(model_name)
+        self.hf_pipeline = pipeline("text-generation", model=self.model, tokenizer=self.tokenizer)
+        self.llm = HuggingFacePipeline(pipeline=self.hf_pipeline)
 
-# Create a Hugging Face LLM wrapper
-llm = HuggingFacePipeline(pipeline=hf_pipeline)
+    def load_text_from_file(self, file_path):
+        # Load text from a file
+        with open(file_path, 'r') as file:
+            return file.read()
 
-# Function to preprocess text
-def preprocess_text(text):
-    preprocessor = BasicPreprocessor()
-    return preprocessor.preprocess(text)
+    def prepare_text_vector_store(self, text):
+        # Split the text into chunks using RecursiveCharacterTextSplitter
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        texts = text_splitter.split_text(text)
+        
+        # Choose the appropriate embedding model based on the specified embedding_model
+        if self.embedding_model == "OpenAI":
+            embeddings = OpenAIEmbeddings()
+        elif self.embedding_model == "SentenceTransformer":
+            embeddings = SentenceTransformerEmbeddings()
+        else:
+            embeddings = HuggingFaceEmbeddings()
+        
+        # Create a vector store using FAISS
+        return FAISS.from_texts(texts, embeddings)
 
-# Function to split text and create a vector store
-# This function will need to be updated to use a different text splitting approach
-# if CharacterTextSplitter is not available in langchain
-def prepare_text_vector_store(text):
-    # Placeholder for text splitting logic
-    texts = [text]  # Simple example, split your text as needed
-    embeddings = HuggingFaceEmbeddings()
-    return FAISS.from_texts(texts, embeddings)
+    def process_qa_chain(self, docsearch, question):
+        # Create a RetrievalQA chain using the specified chain type
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            chain_type=self.chain_type,
+            retriever=docsearch.as_retriever(),
+            input_key="question"
+        )
+        # Process the question and return the answer
+        return qa_chain({"question": question})['result']
 
-# Main function to handle user input and process the QA chain
+    def save_answers_to_file(self, answers, output_file):
+        # Save the answers to a file
+        with open(output_file, 'w') as file:
+            for answer in answers:
+                file.write(answer + '\n')
+
 def main():
-    text = input("Enter the text you want to ask questions about: ")
-    preprocessed_text = preprocess_text(text)
-    try:
-        docsearch = prepare_text_vector_store(preprocessed_text)
-    except Exception as e:
-        print(f"An error occurred while preparing the text vector store: {e}")
+    # Create an instance of the AdvancedQAAlgorithm with the desired model, embedding model, and chain type
+    algo = AdvancedQAAlgorithm(model_name="gpt2-medium", embedding_model="SentenceTransformer", chain_type="map_reduce")
+
+    # Get the file path from user input
+    file_path = input("Enter the path to the text file: ")
+    
+    # Check if the file exists
+    if not os.path.isfile(file_path):
+        logger.error(f"File not found: {file_path}")
         return
 
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=docsearch.as_retriever(),
-        input_key="question"
-    )
+    # Load the text from the file
+    text = algo.load_text_from_file(file_path)
+    
+    # Prepare the text vector store
+    try:
+        docsearch = algo.prepare_text_vector_store(text)
+    except Exception as e:
+        logger.error(f"An error occurred while preparing the text vector store: {e}")
+        return
 
+    # Collect questions from the user
+    questions = []
     while True:
-        question = input("Ask a question about the text (or type 'quit' to exit): ")
-        if question.lower() == 'quit':
+        question = input("Ask a question about the text (or press Enter to finish): ")
+        if question == "":
             break
+        questions.append(question)
+
+    # Process the questions and store the answers
+    answers = []
+    for question in questions:
         try:
-            answer = qa_chain({"question": question})
-            print("Answer:", answer['result'])
+            answer = algo.process_qa_chain(docsearch, question)
+            answers.append(answer)
+            print(f"Question: {question}")
+            print(f"Answer: {answer}\n")
         except Exception as e:
-            print(f"An error occurred while answering the question: {e}")
+            logger.error(f"An error occurred while answering the question: {e}")
+
+    # Save the answers to a file
+    output_file = 'answers.txt'
+    algo.save_answers_to_file(answers, output_file)
+    print(f"Answers saved to {output_file}")
 
 if __name__ == "__main__":
     main()
